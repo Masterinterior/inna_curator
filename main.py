@@ -715,6 +715,24 @@ def _startup():
 def should_show_kb_links(text: str) -> bool:
     if not text:
         return False
+
+    t = normalize(text)
+
+    # 1) Если есть слово "урок" — это ещё не точно.
+    # Срабатываем только если "урок" + маркер поиска в программе.
+    has_lesson_word = ("урок" in t)
+
+    has_locator_words = any(w in t for w in [
+        "где", "в каком", "какой", "лежит", "найти", "открыть", "посмотреть",
+        "в курсе", "в обучении", "в программе", "в модуле", "в ступени",
+        "модуль", "ступень", "раздел"
+    ])
+
+    if has_lesson_word and has_locator_words:
+        return True
+
+    # 2) Или строгие фразы без слова "урок"
+    # (например: "в каком модуле это?" — тоже про программу)
     return bool(COURSE_LOCATOR_RE.search(text))
 
 # ================= ALBUM PROCESSOR =================
