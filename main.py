@@ -712,7 +712,10 @@ def format_kb_hits(hits: List[Dict[str, Any]], user_query: str) -> str:
 def _startup():
     n, msg = load_kb()
     print(f"KB loaded: {n} items, status: {msg}")
-
+def should_show_kb_links(text: str) -> bool:
+    if not text:
+        return False
+    return bool(COURSE_LOCATOR_RE.search(text))
 
 # ================= ALBUM PROCESSOR =================
 async def _process_album(chat_id: int, album_id: str):
