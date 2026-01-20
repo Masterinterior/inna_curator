@@ -4,6 +4,7 @@ import time
 import json
 import base64
 import asyncio
+import math
 from typing import Dict, List, Any, Optional, Tuple
 
 import requests
@@ -16,8 +17,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 HTTP_TIMEOUT = 25
 MAX_IMAGE_BYTES = 6_000_000
 
-# Knowledge base file
+# Knowledge base files
 KB_PATH = "knowledge/knowledge.txt"
+KB_EMB_PATH = "knowledge/embeddings.json"  # prebuilt semantic index
 
 # ================= APP =================
 app = FastAPI()
@@ -201,6 +203,23 @@ def openai_with_image(
         return "Я вижу, что пришло фото, но сейчас не могу его разобрать из-за тех. паузы 🙏 Попробуй ещё раз."
 
 
+def openai_embed(text: str) -> Optional[List[float]]:
+    """
+    Creates embedding for query (fast & cheap).
+    """
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        r = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=[text],
+        )
+        return r.data[0].embedding
+    except Exception as e:
+        print("OPENAI embed exception:", repr(e))
+        return None
+
+
 # ================= CONTEXT =================
 def add_context(chat_id: int, role: str, content: str):
     CHAT_CONTEXT.setdefault(chat_id, [])
@@ -336,7 +355,6 @@ COURSE_LOCATOR_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 HOWTO_RE = re.compile(
     r"(как\s+сделать|как\s+собрать|как\s+создать|как\s+настроить|"
     r"объясни|покажи|инструкц|пошагово|мне\s+нужно|хочу\s+сделать|"
@@ -344,17 +362,68 @@ HOWTO_RE = re.compile(
     re.IGNORECASE,
 )
 
+LIST_LESSONS_RE = re.compile(
+    r"(перечисли|список|все)\s+(уроки|уроков)\b",
+    re.IGNORECASE,
+)
+MODULE_NUM_RE = re.compile(r"\bмодул[ьяею]\s*(\d+)\b", re.IGNORECASE)
+
+
+def normalize(s: str) -> str:
+    s = (s or "").lower().strip().replace("ё", "е")
+    s = re.sub(r"[\"'“”«»]", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
+
 
 def should_show_kb_links(text: str) -> bool:
-    return bool(text and COURSE_LOCATOR_RE.search(text))
+    """
+    Strict trigger:
+    - "урок" + markers of navigation inside the course
+    OR
+    - strict locator phrases from COURSE_LOCATOR_RE (like "в каком модуле", "где в курсе")
+    """
+    if not text:
+        return False
+
+    t = normalize(text)
+
+    has_lesson_word = ("урок" in t)
+    has_locator_words = any(w in t for w in [
+        "где", "в каком", "какой", "лежит", "найти", "открыть", "посмотреть",
+        "в курсе", "в обучении", "в программе", "в модуле", "в ступени",
+        "модуль", "ступень", "раздел"
+    ])
+
+    if has_lesson_word and has_locator_words:
+        return True
+
+    return bool(COURSE_LOCATOR_RE.search(text))
 
 
 def is_howto(text: str) -> bool:
     return bool(text and HOWTO_RE.search(text))
 
 
-# ================= KB (semantic retrieval + LLM rerank) =================
+def wants_list_lessons(text: str) -> bool:
+    return bool(text and LIST_LESSONS_RE.search(text))
+
+
+def extract_module_num(text: str) -> Optional[int]:
+    if not text:
+        return None
+    m = MODULE_NUM_RE.search(text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+# ================= KB (parse + semantic retrieval + LLM rerank) =================
 KB_INDEX: List[Dict[str, Any]] = []
+KB_EMB_VECS: List[List[float]] = []
 
 COURSE_RE = re.compile(r"^\s*СТРУКТУРА\s+КУРСА", re.IGNORECASE)
 STEP_RE = re.compile(r"^\s*\d+\s*ступен", re.IGNORECASE)
@@ -369,13 +438,6 @@ SECTION_FULL_RE = re.compile(
     r"^Раздел\s*[«\"\']?([^»\"\'\:]+)[»\"\']?\s*:\s*(.+)$",
     re.IGNORECASE
 )
-
-
-def normalize(s: str) -> str:
-    s = (s or "").lower().strip().replace("ё", "е")
-    s = re.sub(r"[\"'“”«»]", "", s)
-    s = re.sub(r"\s+", " ", s)
-    return s
 
 
 def split_materials(s: str) -> List[str]:
@@ -526,7 +588,146 @@ def load_kb() -> Tuple[int, str]:
     return len(KB_INDEX), "OK"
 
 
-def kb_candidates(query: str, k: int = 20) -> List[Dict[str, Any]]:
+def _cosine(a: List[float], b: List[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return -1.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for i in range(len(a)):
+        x = float(a[i])
+        y = float(b[i])
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0 or nb <= 0:
+        return -1.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+def load_embeddings() -> Tuple[int, str]:
+    """
+    Loads embeddings.json and tries to align vectors to KB_INDEX by count.
+    """
+    global KB_EMB_VECS
+    KB_EMB_VECS = []
+
+    if not os.path.exists(KB_EMB_PATH):
+        return 0, f"Embeddings not found: {KB_EMB_PATH}"
+
+    try:
+        data = json.loads(open(KB_EMB_PATH, "r", encoding="utf-8", errors="ignore").read())
+    except Exception as e:
+        return 0, f"Embeddings JSON read error: {repr(e)}"
+
+    items = None
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        if isinstance(data.get("items"), list):
+            items = data["items"]
+        elif isinstance(data.get("data"), list):
+            items = data["data"]
+        elif isinstance(data.get("embeddings"), list):
+            items = data["embeddings"]
+
+    if not isinstance(items, list):
+        return 0, "Embeddings JSON format not recognized"
+
+    vecs: List[List[float]] = []
+    for it in items:
+        if isinstance(it, dict):
+            emb = it.get("embedding")
+            if isinstance(emb, list) and emb and isinstance(emb[0], (int, float)):
+                vecs.append([float(x) for x in emb])
+
+    if not vecs:
+        return 0, "No vectors found in embeddings.json"
+
+    if KB_INDEX and len(vecs) >= len(KB_INDEX):
+        KB_EMB_VECS = vecs[:len(KB_INDEX)]
+        return len(KB_EMB_VECS), "OK (aligned)"
+    else:
+        KB_EMB_VECS = vecs
+        return len(KB_EMB_VECS), "OK (unaligned)"
+
+
+def _expand_query_for_semantic(q: str) -> str:
+    """
+    RU<->EN & synonym boost to improve semantic retrieval.
+    """
+    t = normalize(q)
+    add: List[str] = []
+
+    # styles
+    if "мид" in t or "mid" in t:
+        add += ["мид-сенчури", "mid-century", "mid century", "midcentury", "мидсенчури"]
+    if "эко" in t or "eco" in t:
+        add += ["эко-стиль", "eco style", "экостиль"]
+    if "средизем" in t or "mediterr" in t:
+        add += ["средиземноморский", "mediterranean"]
+    if "мемфис" in t or "memphis" in t:
+        add += ["мемфис", "memphis"]
+
+    # rooms
+    if "ванн" in t or "bath" in t:
+        add += ["санузел", "санузлы", "туалет", "bathroom", "wc"]
+    if "сануз" in t or "туалет" in t or "wc" in t:
+        add += ["ванная", "ванна", "bathroom"]
+
+    # software / content
+    if "фотошоп" in t or "photoshop" in t or "ps" in t:
+        add += ["adobe photoshop", "фш", "psd"]
+    if "3д" in t or "3d" in t:
+        add += ["3d", "3д", "3д коллаж", "3d collage", "коллаж", "moodboard", "мудборд"]
+
+    if add:
+        return (q + "\n\nСинонимы/переводы: " + ", ".join(add)).strip()
+    return q
+
+
+def kb_candidates_semantic(query: str, k: int = 20) -> List[Dict[str, Any]]:
+    """
+    Semantic retrieval using prebuilt vectors.
+    """
+    if not query or not KB_INDEX or not KB_EMB_VECS:
+        return []
+
+    q2 = _expand_query_for_semantic(query)
+    qvec = openai_embed(q2)
+    if not qvec:
+        return []
+
+    n = min(len(KB_INDEX), len(KB_EMB_VECS))
+    if n <= 0:
+        return []
+
+    scored: List[Tuple[float, int]] = []
+    for i in range(n):
+        sim = _cosine(qvec, KB_EMB_VECS[i])
+        if sim > -0.5:
+            scored.append((sim, i))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for sim, idx in scored[: max(k * 4, 40)]:
+        it = KB_INDEX[idx]
+        key = (it.get("lesson_url"), it.get("section_title"), it.get("material_title"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+        if len(out) >= k:
+            break
+    return out
+
+
+def kb_candidates_keyword(query: str, k: int = 20) -> List[Dict[str, Any]]:
+    """
+    Keyword fallback scorer.
+    """
     if not query or not KB_INDEX:
         return []
 
@@ -534,25 +735,31 @@ def kb_candidates(query: str, k: int = 20) -> List[Dict[str, Any]]:
 
     expansions: List[str] = []
     if "ванн" in q:
-        expansions += ["санузел", "санузлы", "туалет"]
-    if "сануз" in q or "туалет" in q:
-        expansions += ["ванная", "ванна"]
+        expansions += ["санузел", "санузлы", "туалет", "bathroom", "wc"]
+    if "сануз" in q or "туалет" in q or "wc" in q:
+        expansions += ["ванная", "ванна", "bathroom"]
 
     if "3d" in q or "3д" in q:
-        expansions += ["3д", "3d", "коллаж", "3д коллаж", "3d коллаж", "3д коллажа"]
-    if "коллаж" in q:
-        expansions += ["3д", "3d", "3д коллажа", "3d коллажа", "мудборд", "концепт-коллаж"]
+        expansions += ["3д", "3d", "коллаж", "3д коллаж", "3d collage", "мудборд", "moodboard"]
+    if "коллаж" in q or "moodboard" in q:
+        expansions += ["3д", "3d", "3д коллаж", "3d collage"]
 
     if "photoshop" in q or "фотошоп" in q:
         expansions += ["ps", "adobe photoshop"]
+
+    # styles
+    if "мид" in q or "mid" in q:
+        expansions += ["мид-сенчури", "mid-century", "mid century", "мидсенчури"]
+    if "эко" in q or "eco" in q:
+        expansions += ["эко-стиль", "eco style", "экостиль"]
 
     terms = [w for w in re.findall(r"[a-zа-я0-9]+", q) if len(w) >= 3]
     for e in expansions:
         terms += [w for w in re.findall(r"[a-zа-я0-9]+", normalize(e)) if len(w) >= 3]
     terms = list(dict.fromkeys(terms))
 
-    need_bath = ("ванн" in q) or ("сануз" in q) or ("туалет" in q)
-    bath_terms = ["сануз", "ванн", "туалет"]
+    need_bath = ("ванн" in q) or ("сануз" in q) or ("туалет" in q) or ("bath" in q) or ("wc" in q)
+    bath_terms = ["сануз", "ванн", "туалет", "bath", "wc"]
 
     scored: List[Tuple[float, Dict[str, Any]]] = []
     for it in KB_INDEX:
@@ -597,6 +804,16 @@ def kb_candidates(query: str, k: int = 20) -> List[Dict[str, Any]]:
     return uniq
 
 
+def kb_candidates(query: str, k: int = 20) -> List[Dict[str, Any]]:
+    """
+    Prefer semantic search; fallback to keyword.
+    """
+    sem = kb_candidates_semantic(query, k=k)
+    if sem:
+        return sem
+    return kb_candidates_keyword(query, k=k)
+
+
 def kb_select_with_llm(user_query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not candidates:
         return []
@@ -619,7 +836,7 @@ def kb_select_with_llm(user_query: str, candidates: List[Dict[str, Any]]) -> Lis
         "Ты — методист и куратор курса дизайна интерьера.\n"
         "Тебе дали вопрос студента и список кандидатов из базы знаний.\n"
         "Задача: выбрать до 3 самых релевантных кандидатов ПО СМЫСЛУ.\n"
-        "Учитывай синонимы (ванная=санузел), формулировки в ДЗ, цель урока, и разделы.\n"
+        "Учитывай синонимы и переводы RU<->EN (mid-century = мид-сенчури), формулировки в ДЗ, цель урока.\n"
         "Если в базе НЕТ ничего подходящего — верни NONE.\n"
         "Верни ТОЛЬКО JSON без текста вокруг:\n"
         "{\"pick\":[1,5],\"reason\":\"...\"} или {\"pick\":[],\"reason\":\"NONE\"}\n"
@@ -631,7 +848,7 @@ def kb_select_with_llm(user_query: str, candidates: List[Dict[str, Any]]) -> Lis
             {"role": "user", "content": f"Вопрос студента:\n{user_query}\n\nКандидаты:\n{json.dumps(packed, ensure_ascii=False)}"},
         ],
         max_tokens=350,
-        temperature=0.25,
+        temperature=0.2,
     )
 
     try:
@@ -709,32 +926,66 @@ def format_kb_hits(hits: List[Dict[str, Any]], user_query: str) -> str:
     return "\n".join(out).strip()
 
 
+def format_module_lessons(module_num: int) -> str:
+    """
+    List lessons for a module with lesson links (no duplicates).
+    """
+    if not KB_INDEX:
+        return "База знаний пока не загружена 🙏"
+
+    target = str(module_num)
+    module_hits: List[Dict[str, Any]] = []
+    for it in KB_INDEX:
+        mt = (it.get("module_title") or "").strip().lower().replace("ё", "е")
+        if re.search(rf"(^|\s){re.escape(target)}\s*модул", mt):
+            module_hits.append(it)
+
+    if not module_hits:
+        return f"Не нашла модуль {module_num} в базе 🙏 Если скажешь точное название модуля — найду точнее."
+
+    lessons: Dict[str, Dict[str, str]] = {}
+    for it in module_hits:
+        lt = (it.get("lesson_title") or "").strip()
+        url = (it.get("lesson_url") or "").strip()
+        if not lt:
+            continue
+        if lt not in lessons:
+            lessons[lt] = {"url": url}
+        if not lessons[lt]["url"] and url:
+            lessons[lt]["url"] = url
+
+    if not lessons:
+        return f"В модуле {module_num} нашлись записи, но без названий уроков. Проверь формат knowledge.txt 🙏"
+
+    def lesson_sort_key(title: str) -> Tuple[int, str]:
+        m = re.search(r"(\d+)\s*урок", title.lower())
+        if m:
+            return (int(m.group(1)), title)
+        return (10**9, title)
+
+    ordered = sorted(lessons.items(), key=lambda kv: lesson_sort_key(kv[0]))
+
+    out: List[str] = []
+    out.append(f"📚 <b>Модуль {module_num}: уроки</b>\n")
+    for title, meta in ordered:
+        url = (meta.get("url") or "").strip()
+        if url:
+            out.append(f"— <b>{title}</b>\n{url}")
+        else:
+            out.append(f"— <b>{title}</b>\n(ссылка не указана в базе)")
+
+    out.append("\nЕсли хочешь — уточни тему (например: «3D коллаж ванной»), и я дам точный урок и раздел.")
+    return "\n".join(out).strip()
+
+
 @app.on_event("startup")
 def _startup():
     n, msg = load_kb()
     print(f"KB loaded: {n} items, status: {msg}")
-def should_show_kb_links(text: str) -> bool:
-    if not text:
-        return False
 
-    t = normalize(text)
+    en, emsg = load_embeddings()
+    print(f"Embeddings loaded: {en} vectors, status: {emsg}")
 
-    # 1) Если есть слово "урок" — это ещё не точно.
-    # Срабатываем только если "урок" + маркер поиска в программе.
-    has_lesson_word = ("урок" in t)
-
-    has_locator_words = any(w in t for w in [
-        "где", "в каком", "какой", "лежит", "найти", "открыть", "посмотреть",
-        "в курсе", "в обучении", "в программе", "в модуле", "в ступени",
-        "модуль", "ступень", "раздел"
-    ])
-
-    if has_lesson_word and has_locator_words:
-        return True
-
-    # 2) Или строгие фразы без слова "урок"
-    # (например: "в каком модуле это?" — тоже про программу)
-    return bool(COURSE_LOCATOR_RE.search(text))
 
 # ================= ALBUM PROCESSOR =================
 async def _process_album(chat_id: int, album_id: str):
@@ -743,10 +994,8 @@ async def _process_album(chat_id: int, album_id: str):
     if not data:
         return
 
-    # wait debounce to collect last images
     await asyncio.sleep(ALBUM_DEBOUNCE_SEC)
 
-    # if updated after scheduling, rescheduled task will handle it
     data2 = ALBUM_BUFFER.get(key)
     if not data2 or data2.get("task_id") != data.get("task_id"):
         return
@@ -754,7 +1003,6 @@ async def _process_album(chat_id: int, album_id: str):
     images: List[bytes] = data2.get("images", [])
     caption: str = (data2.get("caption") or "").strip()
 
-    # remove from buffer now
     ALBUM_BUFFER.pop(key, None)
 
     if not images:
@@ -762,7 +1010,6 @@ async def _process_album(chat_id: int, album_id: str):
 
     tg_typing(chat_id)
 
-    # describe each image, store in history
     nums: List[int] = []
     descs: List[Tuple[int, str]] = []
     for idx, img in enumerate(images, 1):
@@ -777,14 +1024,11 @@ async def _process_album(chat_id: int, album_id: str):
         nums.append(num)
         descs.append((num, desc))
 
-    # Add a single "album marker" to chat context (helps references later)
     add_context(chat_id, "user", f"[Пользователь прислал альбом фото: {', '.join([f'#{n}' for n in nums])}]")
 
-    # If caption exists -> answer based on caption + ALL descriptions (chat-style)
     if caption:
         add_context(chat_id, "user", caption)
 
-        # If caption implies comparison, compare all photos via descriptions
         if COMPARE_RE.search(caption) and len(descs) >= 2:
             packed = "\n\n".join([f"Фото #{n}:\n{d}" for n, d in descs])
             messages = [
@@ -809,7 +1053,6 @@ async def _process_album(chat_id: int, album_id: str):
             tg_send(chat_id, answer)
             return
 
-        # Not comparison: answer caption like ChatGPT using the descriptions as context
         packed = "\n\n".join([f"Фото #{n}:\n{d}" for n, d in descs])
         messages = [
             {"role": "system", "content": SYSTEM_ROLE + "\n" + avoid_repetition_hint(chat_id)},
@@ -830,8 +1073,6 @@ async def _process_album(chat_id: int, album_id: str):
         tg_send(chat_id, answer)
         return
 
-    # No caption: one combined warm comment about album (varied focus)
-    # rotate focus by album size/last num
     focus = ["композицию", "свет", "цвет", "функциональность", "материалы и фактуры"]
     f = focus[nums[-1] % len(focus)]
     packed_short = "\n\n".join([f"Фото #{n}: {d[:220].strip()}…" for n, d in descs])
@@ -859,7 +1100,6 @@ def _schedule_album(chat_id: int, album_id: str):
     data = ALBUM_BUFFER.get(key)
     if not data:
         return
-    # bump task id so older tasks self-cancel
     data["task_id"] = str(time.time())
     ALBUM_BUFFER[key] = data
     asyncio.create_task(_process_album(chat_id, album_id))
@@ -893,7 +1133,6 @@ async def webhook(req: Request):
             key = (chat_id, str(album_id))
             buf = ALBUM_BUFFER.get(key) or {"images": [], "caption": "", "task_id": ""}
             buf["images"].append(img)
-            # Telegram usually puts caption only on first message; keep first non-empty
             if caption and not buf.get("caption"):
                 buf["caption"] = caption
             ALBUM_BUFFER[key] = buf
@@ -938,6 +1177,22 @@ async def webhook(req: Request):
     if text:
         tg_typing(chat_id)
         add_context(chat_id, "user", text)
+
+        # ====== LIST LESSONS FOR MODULE (only if user asked list) ======
+        if wants_list_lessons(text):
+            mn = extract_module_num(text)
+            if mn is not None:
+                answer = format_module_lessons(mn)
+                remember_assistant(chat_id, answer)
+                add_context(chat_id, "assistant", answer)
+                tg_send(chat_id, answer)
+                return {"ok": True}
+            else:
+                answer = "Ок 🙂 Напиши, пожалуйста: «все уроки модуля 2» (с номером модуля)."
+                remember_assistant(chat_id, answer)
+                add_context(chat_id, "assistant", answer)
+                tg_send(chat_id, answer)
+                return {"ok": True}
 
         # ====== 🔥 COMPARISON REQUEST (by #numbers or last 2) ======
         if COMPARE_RE.search(text) and len(IMAGE_HISTORY.get(chat_id, [])) >= 2:
@@ -994,11 +1249,11 @@ async def webhook(req: Request):
             tg_send(chat_id, answer)
             return {"ok": True}
 
-        # ====== KB LINKS ONLY WHEN ASKED "где в курсе / ссылка / в каком уроке" ======
+        # ====== KB LINKS ONLY WHEN ASKED "где в курсе / в каком уроке / ссылка на урок" ======
         kb_block = ""
         if should_show_kb_links(text):
-            cand = kb_candidates(text, k=20)
-            picked = kb_select_with_llm(text, cand)
+            cand = kb_candidates(text, k=20)         # <-- semantic + fallback
+            picked = kb_select_with_llm(text, cand)  # <-- keep your LLM rerank
             kb_block = format_kb_hits(picked, text)
 
         if kb_block:
