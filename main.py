@@ -23,7 +23,30 @@ KB_EMB_PATH = "knowledge/embeddings.json"  # prebuilt semantic index
 
 # ================= APP =================
 app = FastAPI()
+# ================= DAILY MESSAGE LIMIT =================
+DAILY_LIMIT = 70  # ответов Инны в сутки на один чат
+DAILY_COUNTER: Dict[int, Dict[str, int]] = {}
 
+def _today_key() -> str:
+    return time.strftime("%Y-%m-%d", time.localtime())
+
+def can_reply_today(chat_id: int) -> Tuple[bool, int]:
+    day = _today_key()
+    rec = DAILY_COUNTER.get(chat_id)
+    if not rec or rec.get("day") != day:
+        DAILY_COUNTER[chat_id] = {"day": day, "count": 0}
+        rec = DAILY_COUNTER[chat_id]
+    remaining = max(0, DAILY_LIMIT - int(rec.get("count", 0)))
+    return (remaining > 0, remaining)
+
+def inc_today(chat_id: int):
+    day = _today_key()
+    rec = DAILY_COUNTER.get(chat_id)
+    if not rec or rec.get("day") != day:
+        DAILY_COUNTER[chat_id] = {"day": day, "count": 0}
+        rec = DAILY_COUNTER[chat_id]
+    rec["count"] = int(rec.get("count", 0)) + 1
+    
 # ================= MEMORY =================
 CONTEXT_LIMIT = 14  # keep last 12-14 messages
 CHAT_CONTEXT: Dict[int, List[Dict[str, Any]]] = {}
