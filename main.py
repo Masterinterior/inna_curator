@@ -1245,29 +1245,29 @@ async def webhook(req: Request):
         tg_send(chat_id, auto_answer)
         return {"ok": True}
 
-  # ===== TEXT MESSAGE =====
-if text:
-    tg_typing(chat_id)
+    # ===== TEXT MESSAGE =====
+    if text:
+        tg_typing(chat_id)
 
-    # ===== DAILY LIMIT CHECK =====
-    ok, remaining = can_reply_today(chat_id)
-    if not ok:
-        tg_send(
-            chat_id,
-            "Мы сегодня уже очень много разобрали 💛\n"
-            "Я отвечаю подробно, поэтому есть дневной лимит.\n\n"
-            "Завтра продолжим — если вопрос срочный, попробуй сформулировать его одним сообщением."
-        )
-        inc_today(chat_id)  # считаем этот сервисный ответ тоже
-        return {"ok": True}
+        # ===== DAILY LIMIT CHECK =====
+        ok, remaining = can_reply_today(chat_id)
+        if not ok:
+            tg_send(
+                chat_id,
+                "Мы сегодня уже очень много разобрали 💛\n"
+                "Я отвечаю подробно, поэтому есть дневной лимит.\n\n"
+                "Завтра продолжим — если вопрос срочный, попробуй сформулировать его одним сообщением."
+            )
+            inc_today(chat_id)
+            return {"ok": True}
 
-    # ===== TOPIC GUARD (forbidden topics) =====
-    if is_forbidden_topic(text):
-        tg_send(chat_id, OFFTOP_REPLY)
-        inc_today(chat_id)
-        return {"ok": True}
+        # ===== TOPIC GUARD (forbidden topics) =====
+        if is_forbidden_topic(text):
+            tg_send(chat_id, OFFTOP_REPLY)
+            inc_today(chat_id)
+            return {"ok": True}
 
-    add_context(chat_id, "user", text)
+        add_context(chat_id, "user", text)
 
     # ====== LIST LESSONS FOR MODULE (only if user asked list) ======
     if wants_list_lessons(text):
