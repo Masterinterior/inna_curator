@@ -23,6 +23,7 @@ KB_EMB_PATH = "knowledge/embeddings.json"  # prebuilt semantic index
 
 # ================= APP =================
 app = FastAPI()
+
 # ================= DAILY MESSAGE LIMIT =================
 DAILY_LIMIT = 70  # ответов Инны в сутки на один чат
 DAILY_COUNTER: Dict[int, Dict[str, int]] = {}
@@ -46,7 +47,7 @@ def inc_today(chat_id: int):
         DAILY_COUNTER[chat_id] = {"day": day, "count": 0}
         rec = DAILY_COUNTER[chat_id]
     rec["count"] = int(rec.get("count", 0)) + 1
-    
+
 # ================= MEMORY =================
 CONTEXT_LIMIT = 14  # keep last 12-14 messages
 CHAT_CONTEXT: Dict[int, List[Dict[str, Any]]] = {}
@@ -69,12 +70,10 @@ LAST_IMAGE: Dict[int, bytes] = {}
 LAST_IMAGE_AT: Dict[int, float] = {}
 IMAGE_TTL = 60 * 30  # 30 minutes
 
-
 def has_fresh_image(chat_id: int) -> bool:
     if chat_id not in LAST_IMAGE:
         return False
     return (time.time() - LAST_IMAGE_AT.get(chat_id, 0)) <= IMAGE_TTL
-
 
 # ================= SYSTEM ROLE =================
 SYSTEM_ROLE = (
@@ -94,10 +93,8 @@ SYSTEM_ROLE = (
     "Часто заканчивай ответ приглашением продолжить: «Если хочешь — могу…». "
     "Используй эмоджи уместно."
 )
-# ================= TOPIC GUARD (FORBIDDEN TOPICS) =================
-# Мы НЕ ограничиваем эмпатию, мы отсекаем явно ненужные домены.
-# Разрешено: дизайн/ремонт/обучение/диз.софт/AI-дизайн/соцсети/бренд/цены/договоры/рабочие отношения с подрядчиками.
 
+# ================= TOPIC GUARD (FORBIDDEN TOPICS) =================
 ALLOWED_TOPIC_RE = re.compile(
     r"(дизайн|интерьер|ремонт|отделк|планировк|перепланировк|зонирован|эргономик|"
     r"мебел|кухн|ванн|сануз|спальн|гостин|детск|прихож|"
@@ -140,14 +137,13 @@ def is_forbidden_topic(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
-    # Если есть явные маркеры запрещённых тем и нет явных маркеров разрешённых — блокируем
     if FORBIDDEN_TOPIC_RE.search(t) and not ALLOWED_TOPIC_RE.search(t):
         return True
     return False
+
 # ================= TELEGRAM TEXT SANITIZE =================
 MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
-
 
 def to_tg_html(text: str) -> str:
     """
@@ -162,7 +158,6 @@ def to_tg_html(text: str) -> str:
     t = MD_ITALIC_RE.sub(r"<i>\1</i>", t)
     t = t.replace("**", "")
     return t
-
 
 # ================= TELEGRAM =================
 def tg_send(chat_id: int, text: str):
@@ -183,7 +178,6 @@ def tg_send(chat_id: int, text: str):
     except Exception as e:
         print("TG sendMessage exception:", repr(e))
 
-
 def tg_typing(chat_id: int):
     try:
         requests.post(
@@ -193,7 +187,6 @@ def tg_typing(chat_id: int):
         )
     except Exception as e:
         print("TG typing exception:", repr(e))
-
 
 def tg_get_photo(file_id: str) -> Optional[bytes]:
     try:
@@ -219,7 +212,6 @@ def tg_get_photo(file_id: str) -> Optional[bytes]:
         print("TG getPhoto exception:", repr(e))
         return None
 
-
 # ================= OPENAI =================
 def openai_chat(messages: List[Dict[str, Any]], max_tokens: int = 900, temperature: float = 0.45) -> str:
     try:
@@ -236,7 +228,6 @@ def openai_chat(messages: List[Dict[str, Any]], max_tokens: int = 900, temperatu
     except Exception as e:
         print("OPENAI chat exception:", repr(e))
         return "Сейчас у меня небольшая техническая пауза 🙏 Попробуй ещё раз через минуту."
-
 
 def openai_with_image(
     prompt: str,
@@ -274,7 +265,6 @@ def openai_with_image(
         print("OPENAI image exception:", repr(e))
         return "Я вижу, что пришло фото, но сейчас не могу его разобрать из-за тех. паузы 🙏 Попробуй ещё раз."
 
-
 def openai_embed(text: str) -> Optional[List[float]]:
     """
     Creates embedding for query (fast & cheap).
@@ -291,19 +281,16 @@ def openai_embed(text: str) -> Optional[List[float]]:
         print("OPENAI embed exception:", repr(e))
         return None
 
-
 # ================= CONTEXT =================
 def add_context(chat_id: int, role: str, content: str):
     CHAT_CONTEXT.setdefault(chat_id, [])
     CHAT_CONTEXT[chat_id].append({"role": role, "content": content})
     CHAT_CONTEXT[chat_id] = CHAT_CONTEXT[chat_id][-CONTEXT_LIMIT:]
 
-
 def remember_assistant(chat_id: int, text: str):
     RECENT_ASSISTANT.setdefault(chat_id, [])
     RECENT_ASSISTANT[chat_id].append((text or "")[:900])
     RECENT_ASSISTANT[chat_id] = RECENT_ASSISTANT[chat_id][-RECENT_LIMIT:]
-
 
 def avoid_repetition_hint(chat_id: int) -> str:
     recent = RECENT_ASSISTANT.get(chat_id) or []
@@ -316,7 +303,6 @@ def avoid_repetition_hint(chat_id: int) -> str:
         "Меняй лексику и фокус: композиция/свет/цвет/функция/материалы.\n"
         f"НЕ ПОВТОРЯЙ формулировки из последних ответов:\n{last}"
     )
-
 
 # ======== IMAGE HISTORY HELPERS ========
 IMAGE_REF_RE = re.compile(
@@ -342,7 +328,6 @@ COMPARE_RE = re.compile(
 )
 PHOTO_NUM_RE = re.compile(r"#\s*(\d+)")
 
-
 def push_image(chat_id: int, img: bytes, desc: str, album_id: Optional[str] = None) -> int:
     IMAGE_SEQ[chat_id] = IMAGE_SEQ.get(chat_id, 0) + 1
     num = IMAGE_SEQ[chat_id]
@@ -357,7 +342,6 @@ def push_image(chat_id: int, img: bytes, desc: str, album_id: Optional[str] = No
     })
     IMAGE_HISTORY[chat_id] = IMAGE_HISTORY[chat_id][-IMAGE_KEEP:]
     return num
-
 
 def pick_image_from_history(chat_id: int, user_text: str) -> Optional[Dict[str, Any]]:
     hist = IMAGE_HISTORY.get(chat_id) or []
@@ -396,7 +380,6 @@ def pick_image_from_history(chat_id: int, user_text: str) -> Optional[Dict[str, 
 
     return hist[-1]
 
-
 def build_visual_context_messages(chat_id: int, limit: int = 4) -> List[Dict[str, Any]]:
     hist = IMAGE_HISTORY.get(chat_id) or []
     if not hist:
@@ -413,11 +396,9 @@ def build_visual_context_messages(chat_id: int, limit: int = 4) -> List[Dict[str
     joined = "\n\n".join(parts).strip()
     return [{"role": "assistant", "content": f"Визуальные заметки по последним фото:\n{joined}"}]
 
-
 def get_context(chat_id: int) -> List[Dict[str, Any]]:
     ctx = CHAT_CONTEXT.get(chat_id, []).copy()
     return build_visual_context_messages(chat_id, limit=4) + ctx
-
 
 # ================= INTENT: KB LINKS VS HOW-TO =================
 COURSE_LOCATOR_RE = re.compile(
@@ -440,21 +421,13 @@ LIST_LESSONS_RE = re.compile(
 )
 MODULE_NUM_RE = re.compile(r"\bмодул[ьяею]\s*(\d+)\b", re.IGNORECASE)
 
-
 def normalize(s: str) -> str:
     s = (s or "").lower().strip().replace("ё", "е")
     s = re.sub(r"[\"'“”«»]", "", s)
     s = re.sub(r"\s+", " ", s)
     return s
 
-
 def should_show_kb_links(text: str) -> bool:
-    """
-    Strict trigger:
-    - "урок" + markers of navigation inside the course
-    OR
-    - strict locator phrases from COURSE_LOCATOR_RE (like "в каком модуле", "где в курсе")
-    """
     if not text:
         return False
 
@@ -472,14 +445,11 @@ def should_show_kb_links(text: str) -> bool:
 
     return bool(COURSE_LOCATOR_RE.search(text))
 
-
 def is_howto(text: str) -> bool:
     return bool(text and HOWTO_RE.search(text))
 
-
 def wants_list_lessons(text: str) -> bool:
     return bool(text and LIST_LESSONS_RE.search(text))
-
 
 def extract_module_num(text: str) -> Optional[int]:
     if not text:
@@ -491,7 +461,6 @@ def extract_module_num(text: str) -> Optional[int]:
         return int(m.group(1))
     except Exception:
         return None
-
 
 # ================= KB (parse + semantic retrieval + LLM rerank) =================
 KB_INDEX: List[Dict[str, Any]] = []
@@ -511,12 +480,10 @@ SECTION_FULL_RE = re.compile(
     re.IGNORECASE
 )
 
-
 def split_materials(s: str) -> List[str]:
     parts = [p.strip() for p in (s or "").split(",")]
     parts = [p.strip(" .;") for p in parts if p.strip()]
     return parts
-
 
 def load_kb() -> Tuple[int, str]:
     global KB_INDEX
@@ -659,7 +626,6 @@ def load_kb() -> Tuple[int, str]:
 
     return len(KB_INDEX), "OK"
 
-
 def _cosine(a: List[float], b: List[float]) -> float:
     if not a or not b or len(a) != len(b):
         return -1.0
@@ -676,11 +642,7 @@ def _cosine(a: List[float], b: List[float]) -> float:
         return -1.0
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
-
 def load_embeddings() -> Tuple[int, str]:
-    """
-    Loads embeddings.json and tries to align vectors to KB_INDEX by count.
-    """
     global KB_EMB_VECS
     KB_EMB_VECS = []
 
@@ -723,15 +685,10 @@ def load_embeddings() -> Tuple[int, str]:
         KB_EMB_VECS = vecs
         return len(KB_EMB_VECS), "OK (unaligned)"
 
-
 def _expand_query_for_semantic(q: str) -> str:
-    """
-    RU<->EN & synonym boost to improve semantic retrieval.
-    """
     t = normalize(q)
     add: List[str] = []
 
-    # styles
     if "мид" in t or "mid" in t:
         add += ["мид-сенчури", "mid-century", "mid century", "midcentury", "мидсенчури"]
     if "эко" in t or "eco" in t:
@@ -741,13 +698,11 @@ def _expand_query_for_semantic(q: str) -> str:
     if "мемфис" in t or "memphis" in t:
         add += ["мемфис", "memphis"]
 
-    # rooms
     if "ванн" in t or "bath" in t:
         add += ["санузел", "санузлы", "туалет", "bathroom", "wc"]
     if "сануз" in t or "туалет" in t or "wc" in t:
         add += ["ванная", "ванна", "bathroom"]
 
-    # software / content
     if "фотошоп" in t or "photoshop" in t or "ps" in t:
         add += ["adobe photoshop", "фш", "psd"]
     if "3д" in t or "3d" in t:
@@ -757,11 +712,7 @@ def _expand_query_for_semantic(q: str) -> str:
         return (q + "\n\nСинонимы/переводы: " + ", ".join(add)).strip()
     return q
 
-
 def kb_candidates_semantic(query: str, k: int = 20) -> List[Dict[str, Any]]:
-    """
-    Semantic retrieval using prebuilt vectors.
-    """
     if not query or not KB_INDEX or not KB_EMB_VECS:
         return []
 
@@ -795,11 +746,7 @@ def kb_candidates_semantic(query: str, k: int = 20) -> List[Dict[str, Any]]:
             break
     return out
 
-
 def kb_candidates_keyword(query: str, k: int = 20) -> List[Dict[str, Any]]:
-    """
-    Keyword fallback scorer.
-    """
     if not query or not KB_INDEX:
         return []
 
@@ -819,7 +766,6 @@ def kb_candidates_keyword(query: str, k: int = 20) -> List[Dict[str, Any]]:
     if "photoshop" in q or "фотошоп" in q:
         expansions += ["ps", "adobe photoshop"]
 
-    # styles
     if "мид" in q or "mid" in q:
         expansions += ["мид-сенчури", "mid-century", "mid century", "мидсенчури"]
     if "эко" in q or "eco" in q:
@@ -875,16 +821,11 @@ def kb_candidates_keyword(query: str, k: int = 20) -> List[Dict[str, Any]]:
 
     return uniq
 
-
 def kb_candidates(query: str, k: int = 20) -> List[Dict[str, Any]]:
-    """
-    Prefer semantic search; fallback to keyword.
-    """
     sem = kb_candidates_semantic(query, k=k)
     if sem:
         return sem
     return kb_candidates_keyword(query, k=k)
-
 
 def kb_select_with_llm(user_query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not candidates:
@@ -936,7 +877,6 @@ def kb_select_with_llm(user_query: str, candidates: List[Dict[str, Any]]) -> Lis
     except Exception:
         return candidates[:1]
 
-
 def best_material_name(it: Dict[str, Any], user_query: str) -> str:
     q = normalize(user_query)
     hw = (it.get("homework") or "").strip()
@@ -946,7 +886,6 @@ def best_material_name(it: Dict[str, Any], user_query: str) -> str:
         return hw if len(hw) <= 240 else (hw[:240].rstrip() + "…")
 
     return mat or "(материал)"
-
 
 def dedupe_hits_by_lesson(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not hits:
@@ -962,7 +901,6 @@ def dedupe_hits_by_lesson(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen.add(key)
         out.append(it)
     return out
-
 
 def format_kb_hits(hits: List[Dict[str, Any]], user_query: str) -> str:
     if not hits:
@@ -997,11 +935,7 @@ def format_kb_hits(hits: List[Dict[str, Any]], user_query: str) -> str:
 
     return "\n".join(out).strip()
 
-
 def format_module_lessons(module_num: int) -> str:
-    """
-    List lessons for a module with lesson links (no duplicates).
-    """
     if not KB_INDEX:
         return "База знаний пока не загружена 🙏"
 
@@ -1049,7 +983,6 @@ def format_module_lessons(module_num: int) -> str:
     out.append("\nЕсли хочешь — уточни тему (например: «3D коллаж ванной»), и я дам точный урок и раздел.")
     return "\n".join(out).strip()
 
-
 @app.on_event("startup")
 def _startup():
     n, msg = load_kb()
@@ -1057,7 +990,6 @@ def _startup():
 
     en, emsg = load_embeddings()
     print(f"Embeddings loaded: {en} vectors, status: {emsg}")
-
 
 # ================= ALBUM PROCESSOR =================
 async def _process_album(chat_id: int, album_id: str):
@@ -1166,7 +1098,6 @@ async def _process_album(chat_id: int, album_id: str):
     add_context(chat_id, "assistant", answer)
     tg_send(chat_id, answer)
 
-
 def _schedule_album(chat_id: int, album_id: str):
     key = (chat_id, album_id)
     data = ALBUM_BUFFER.get(key)
@@ -1175,7 +1106,6 @@ def _schedule_album(chat_id: int, album_id: str):
     data["task_id"] = str(time.time())
     ALBUM_BUFFER[key] = data
     asyncio.create_task(_process_album(chat_id, album_id))
-
 
 # ================= WEBHOOK =================
 @app.post("/webhook")
@@ -1269,23 +1199,23 @@ async def webhook(req: Request):
 
         add_context(chat_id, "user", text)
 
-    # ====== LIST LESSONS FOR MODULE (only if user asked list) ======
-    if wants_list_lessons(text):
-        mn = extract_module_num(text)
-        if mn is not None:
-            answer = format_module_lessons(mn)
-            remember_assistant(chat_id, answer)
-            add_context(chat_id, "assistant", answer)
-            tg_send(chat_id, answer)
-            inc_today(chat_id)
-            return {"ok": True}
-        else:
-            answer = "Ок 🙂 Напиши, пожалуйста: «все уроки модуля 2» (с номером модуля)."
-            remember_assistant(chat_id, answer)
-            add_context(chat_id, "assistant", answer)
-            tg_send(chat_id, answer)
-            inc_today(chat_id)
-            return {"ok": True}
+        # ====== LIST LESSONS FOR MODULE (only if user asked list) ======
+        if wants_list_lessons(text):
+            mn = extract_module_num(text)
+            if mn is not None:
+                answer = format_module_lessons(mn)
+                remember_assistant(chat_id, answer)
+                add_context(chat_id, "assistant", answer)
+                tg_send(chat_id, answer)
+                inc_today(chat_id)
+                return {"ok": True}
+            else:
+                answer = "Ок 🙂 Напиши, пожалуйста: «все уроки модуля 2» (с номером модуля)."
+                remember_assistant(chat_id, answer)
+                add_context(chat_id, "assistant", answer)
+                tg_send(chat_id, answer)
+                inc_today(chat_id)
+                return {"ok": True}
 
         # ====== 🔥 COMPARISON REQUEST (by #numbers or last 2) ======
         if COMPARE_RE.search(text) and len(IMAGE_HISTORY.get(chat_id, [])) >= 2:
@@ -1340,13 +1270,14 @@ async def webhook(req: Request):
             remember_assistant(chat_id, answer)
             add_context(chat_id, "assistant", answer)
             tg_send(chat_id, answer)
+            inc_today(chat_id)
             return {"ok": True}
 
         # ====== KB LINKS ONLY WHEN ASKED "где в курсе / в каком уроке / ссылка на урок" ======
         kb_block = ""
         if should_show_kb_links(text):
-            cand = kb_candidates(text, k=20)         # <-- semantic + fallback
-            picked = kb_select_with_llm(text, cand)  # <-- keep your LLM rerank
+            cand = kb_candidates(text, k=20)
+            picked = kb_select_with_llm(text, cand)
             kb_block = format_kb_hits(picked, text)
 
         if kb_block:
@@ -1372,6 +1303,7 @@ async def webhook(req: Request):
             remember_assistant(chat_id, answer)
             add_context(chat_id, "assistant", answer)
             tg_send(chat_id, answer)
+            inc_today(chat_id)
             return {"ok": True}
 
         # ====== OTHERWISE: NORMAL ANSWER (WITH VISUAL CONTEXT IF RELEVANT) ======
@@ -1405,5 +1337,7 @@ async def webhook(req: Request):
         remember_assistant(chat_id, answer)
         add_context(chat_id, "assistant", answer)
         tg_send(chat_id, answer)
+        inc_today(chat_id)
+        return {"ok": True}
 
     return {"ok": True}
