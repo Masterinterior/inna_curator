@@ -1238,35 +1238,47 @@ async def webhook(req: Request):
         tg_send(chat_id, auto_answer)
         return {"ok": True}
 
-    # ===== TEXT MESSAGE =====
-    if text:
-        tg_typing(chat_id)
-        ok, remaining = can_reply_today(chat_id)
-if not ok:
-    tg_send(
-        chat_id,
-        "Мы сегодня уже очень много разобрали 💛\n"
-        "Я отвечаю подробно, поэтому есть дневной лимит.\n\n"
-        "Завтра продолжим — если вопрос срочный, попробуй сформулировать его одним сообщением."
-    )
-    return {"ok": True}
-        add_context(chat_id, "user", text)
+  # ===== TEXT MESSAGE =====
+if text:
+    tg_typing(chat_id)
 
-        # ====== LIST LESSONS FOR MODULE (only if user asked list) ======
-        if wants_list_lessons(text):
-            mn = extract_module_num(text)
-            if mn is not None:
-                answer = format_module_lessons(mn)
-                remember_assistant(chat_id, answer)
-                add_context(chat_id, "assistant", answer)
-                tg_send(chat_id, answer)
-                return {"ok": True}
-            else:
-                answer = "Ок 🙂 Напиши, пожалуйста: «все уроки модуля 2» (с номером модуля)."
-                remember_assistant(chat_id, answer)
-                add_context(chat_id, "assistant", answer)
-                tg_send(chat_id, answer)
-                return {"ok": True}
+    # ===== DAILY LIMIT CHECK =====
+    ok, remaining = can_reply_today(chat_id)
+    if not ok:
+        tg_send(
+            chat_id,
+            "Мы сегодня уже очень много разобрали 💛\n"
+            "Я отвечаю подробно, поэтому есть дневной лимит.\n\n"
+            "Завтра продолжим — если вопрос срочный, попробуй сформулировать его одним сообщением."
+        )
+        inc_today(chat_id)  # считаем этот сервисный ответ тоже
+        return {"ok": True}
+
+    # ===== TOPIC GUARD (forbidden topics) =====
+    if is_forbidden_topic(text):
+        tg_send(chat_id, OFFTOP_REPLY)
+        inc_today(chat_id)
+        return {"ok": True}
+
+    add_context(chat_id, "user", text)
+
+    # ====== LIST LESSONS FOR MODULE (only if user asked list) ======
+    if wants_list_lessons(text):
+        mn = extract_module_num(text)
+        if mn is not None:
+            answer = format_module_lessons(mn)
+            remember_assistant(chat_id, answer)
+            add_context(chat_id, "assistant", answer)
+            tg_send(chat_id, answer)
+            inc_today(chat_id)
+            return {"ok": True}
+        else:
+            answer = "Ок 🙂 Напиши, пожалуйста: «все уроки модуля 2» (с номером модуля)."
+            remember_assistant(chat_id, answer)
+            add_context(chat_id, "assistant", answer)
+            tg_send(chat_id, answer)
+            inc_today(chat_id)
+            return {"ok": True}
 
         # ====== 🔥 COMPARISON REQUEST (by #numbers or last 2) ======
         if COMPARE_RE.search(text) and len(IMAGE_HISTORY.get(chat_id, [])) >= 2:
