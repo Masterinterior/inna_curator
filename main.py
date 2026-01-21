@@ -110,6 +110,13 @@ ALLOWED_TOPIC_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Жёсткий блок: нельзя обойти «мне как дизайнеру интересно»
+ALWAYS_FORBIDDEN_RE = re.compile(
+    r"(политик|выбор|парт(ия|ии)|санкц|госдум|президент|министр|депутат|"
+    r"оппозиц|пропаганд|идеолог|геополит|власть|режим)",
+    re.IGNORECASE,
+)
+
 FORBIDDEN_TOPIC_RE = re.compile(
     r"(физик|квант|относител|формул|интеграл|дифференц|математ|"
     r"медицин|болезн|симптом|диагноз|таблетк|лекарств|анализ(ы)?|"
@@ -137,9 +144,17 @@ def is_forbidden_topic(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+
+    # 1) Жёсткий блок: не обсуждаем это ни при каких обходах
+    if ALWAYS_FORBIDDEN_RE.search(t):
+        return True
+
+    # 2) Мягкий блок: запрещённые темы блокируем, если нет явного разрешённого контекста
     if FORBIDDEN_TOPIC_RE.search(t) and not ALLOWED_TOPIC_RE.search(t):
         return True
+
     return False
+
 
 # ================= TELEGRAM TEXT SANITIZE =================
 MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
